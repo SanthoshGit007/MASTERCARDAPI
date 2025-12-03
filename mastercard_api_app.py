@@ -13,7 +13,7 @@ app = Flask(__name__)
 # --- Configuration (Set via .env) ---
 # Your Aiven MySQL configuration
 DB_USER = os.getenv('MYSQL_USER', 'avnadmin') 
-DB_PASS = os.getenv('MYSQL_PASSWORD')
+DB_PASS = os.getenv('MYSQL_PASSWORD', 'AVNS_NXWZq4aSI2jA1w3aEBT')
 DB_HOST = os.getenv('MYSQL_HOST', 'mysql-88b5bc0-santhoshkumarbsk1998-43a0.g.aivencloud.com') 
 DB_PORT = os.getenv('MYSQL_PORT', '10438') 
 DB_NAME = os.getenv('MYSQL_DATABASE', 'mastercard_db')
