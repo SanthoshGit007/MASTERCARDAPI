@@ -23,7 +23,7 @@ DB_NAME = os.getenv('MYSQL_DATABASE', 'mastercard_db')
 SSL_CA_CERT_PATH = os.getenv('SSL_CA_CERT_PATH', 'ca.pem') 
 
 # SAP CPI Target URL (Endpoint for the MC_PAY_INIT iFlow - TSD Step 3)
-CPI_INITIATE_URL = os.getenv('CPI_INITIATE_URL', 'https://mock-cpi-url.com/cpi/mastercard/initiate_payment')
+CPI_INITIATE_URL = os.getenv('CPI_INITIATE_URL', 'https://671a3e92trial.it-cpitrial03-rt.cfapps.ap21.hana.ondemand.com/http/vcc/payment/initiate')
 
 
 # --- Database Connection Utilities ---
