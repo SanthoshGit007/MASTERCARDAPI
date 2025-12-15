@@ -21,15 +21,14 @@ DB_NAME = os.getenv('MYSQL_DATABASE', 'mastercard_db')
 # Aiven SSL Certificate Authority file path (REQUIRED FOR CONNECTION)
 SSL_CA_CERT_PATH = os.getenv('SSL_CA_CERT_PATH', 'ca.pem') 
 
+# --- FIX APPLIED: Ensure correct CPI URL is the default ---
 # SAP CPI Target URL (Endpoint for the MC_PAY_INIT iFlow - TSD Step 3)
 CPI_INITIATE_URL = os.getenv('CPI_INITIATE_URL', 'https://671a3e92trial.it-cpitrial03-rt.cfapps.ap21.hana.ondemand.com/http/vcc/payment/initiate')
 
-# --- CPI AUTHENTICATION FIX ---
-# BEST PRACTICE: Use environment variables (e.g., os.getenv('CPI_USER'))
-# We are hardcoding for immediate testing based on your input:
+# --- CPI AUTHENTICATION (From previous step) ---
 CPI_USER = 'santhoshkumarbsk1998@gmail.com'
 CPI_PASSWORD = '$@NtroSAP'
-# ------------------------------
+# ------------------------------------------------
 
 
 # --- Database Connection Utilities ---
@@ -97,7 +96,6 @@ def submit_payment_request():
     
     cpi_headers = {
         'Content-Type': 'application/json',
-        # Authentication will now be handled by the 'auth' parameter
     }
     
     try:
@@ -105,7 +103,7 @@ def submit_payment_request():
             CPI_INITIATE_URL, 
             json=data, 
             headers=cpi_headers, 
-            # --- FIX APPLIED: ADD BASIC AUTHENTICATION ---
+            # Basic Auth applied using the user/pass defined above
             auth=(CPI_USER, CPI_PASSWORD),
             verify=False # Set to True in production
         )
@@ -122,6 +120,7 @@ def submit_payment_request():
 
     except requests.exceptions.RequestException as e:
         print(f"CPI Trigger FAILED for ref: {data.get('reference')}. Error: {e}")
+        # When an error occurs, the Python app returns a JSON object containing the error details.
         http_code = getattr(e.response, 'status_code', 500) if e.response else 500
         # TSD Step 6: Return Error
         return jsonify({
@@ -134,7 +133,7 @@ def submit_payment_request():
 
 
 # --- INBOUND ENDPOINT: Settlement Confirmation (Reconciliation Support) ---
-# ... (rest of the code remains the same)
+
 @app.post("/mastercard/receive_settlement_confirmation")
 def receive_settlement_confirmation():
     """
