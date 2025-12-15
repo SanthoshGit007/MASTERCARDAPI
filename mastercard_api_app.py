@@ -61,6 +61,62 @@ def init_db():
 
 init_db()
 
+
+# --- NEW DATABASE LOGGING FUNCTION ---
+
+def log_payment_request(data):
+    """Logs the incoming payment request data to the PAYMENT_REQUEST table."""
+    # Generate a unique ID for the transaction log
+    request_uuid = str(uuid.uuid4())
+    
+    conn = get_db_connection()
+    if not conn:
+        print("CRITICAL: Failed to get DB connection for logging.")
+        # Return the UUID anyway so it can be used for reference
+        return False, request_uuid 
+        
+    try:
+        cursor = conn.cursor()
+        
+        # SQL INSERT statement - ensure the PAYMENT_REQUEST table exists and 
+        # its schema matches these fields
+        sql = """
+        INSERT INTO PAYMENT_REQUEST 
+        (REQUEST_ID, VENDOR_ID, INVOICE, AMOUNT, CURRENCY, COMPANY_CODE, REFERENCE, STATUS, RECEIVED_AT, LAST_UPDATED) 
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        # Prepare the data tuple
+        current_time = datetime.datetime.utcnow()
+        values = (
+            request_uuid,
+            data["vendorld"],
+            data["invoice"],
+            data["amount"],
+            data["currency"],
+            data["companyCode"],
+            data["reference"],
+            "INITIATED", # Initial status before calling CPI
+            current_time,
+            current_time
+        )
+        
+        cursor.execute(sql, values)
+        conn.commit()
+        print(f"Logged payment request {request_uuid} to database.")
+        return True, request_uuid
+        
+    except Error as e:
+        print(f"Database insertion failed: {e}")
+        conn.rollback()
+        return False, request_uuid
+        
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+# ----------------------------------------
+
+
 # --- CORE ENDPOINT: Payment Submission and CPI Trigger (Outbound Flow) ---
 
 @app.post("/mastercard/submit_payment")
@@ -68,7 +124,8 @@ def submit_payment_request():
     """
     1. Receives payment request from the client/SAP.
     2. Validates essential data (TSD Step 2).
-    3. Triggers the SAP CPI iFlow (TSD Step 3).
+    3. Logs request to Aiven DB (NEW STEP).
+    4. Triggers the SAP CPI iFlow (TSD Step 3).
     """
     data = request.json
     
@@ -90,12 +147,23 @@ def submit_payment_request():
     except (TypeError, ValueError):
         return jsonify({"status": "FAILED", "message": "Validation Error: Amount field is invalid or missing."}), 400
 
+    # ----------------------------------------------------------------------
+    # *** INSERTED: NEW STEP - Log the request to Aiven MySQL ***
+    # ----------------------------------------------------------------------
+    log_success, request_uuid = log_payment_request(data)
 
-    # --- TSD Step 3: Trigger CPI iFlow (HTTP Call) ---
+    # Add the generated ID to the data to pass to CPI and include in the response
+    data['request_id'] = request_uuid
+
     print(f"Validation successful for ref: {data.get('reference')}. Forwarding to CPI.")
+    # ----------------------------------------------------------------------
+    
+    # --- TSD Step 3: Trigger CPI iFlow (HTTP Call) ---
     
     cpi_headers = {
         'Content-Type': 'application/json',
+        # Pass the Request ID to CPI for end-to-end tracing
+        'X-Request-ID': request_uuid 
     }
     
     try:
@@ -113,6 +181,7 @@ def submit_payment_request():
         return jsonify({
             "status": "ACCEPTED",
             "reference": data["reference"],
+            "request_id": request_uuid, # Include the new ID in the response
             "message": "Payment request validated and successfully forwarded to SAP CPI.",
             "cpi_status_code": cpi_response.status_code,
             "cpi_response": cpi_response.json() if cpi_response.content else {"note": "No JSON body returned from CPI"}
@@ -126,6 +195,7 @@ def submit_payment_request():
         return jsonify({
             "status": "FAILED", 
             "reference": data["reference"],
+            "request_id": request_uuid, # Include the new ID in the response
             "message": "Failed to trigger SAP CPI iFlow. Check CPI configuration.",
             "error_detail": str(e),
             "cpi_http_code": http_code
