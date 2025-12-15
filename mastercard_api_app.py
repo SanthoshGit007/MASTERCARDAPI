@@ -62,43 +62,46 @@ def init_db():
 init_db()
 
 
-# --- NEW DATABASE LOGGING FUNCTION ---
+# --- CORRECTED DATABASE LOGGING FUNCTION ---
 
 def log_payment_request(data):
-    """Logs the incoming payment request data to the PAYMENT_REQUEST table."""
-    # Generate a unique ID for the transaction log
+    """Logs the incoming payment request data to the PAYMENT_REQUEST table,
+    aligning with the user's provided schema (9 columns).
+    """
     request_uuid = str(uuid.uuid4())
     
     conn = get_db_connection()
     if not conn:
         print("CRITICAL: Failed to get DB connection for logging.")
-        # Return the UUID anyway so it can be used for reference
         return False, request_uuid 
         
     try:
         cursor = conn.cursor()
         
-        # SQL INSERT statement - ensure the PAYMENT_REQUEST table exists and 
-        # its schema matches these fields
+        # *** FIX: Aligned SQL statement to user's 9-column schema ***
+        # The column order must match the values tuple below.
         sql = """
         INSERT INTO PAYMENT_REQUEST 
-        (REQUEST_ID, VENDOR_ID, INVOICE, AMOUNT, CURRENCY, COMPANY_CODE, REFERENCE, STATUS, RECEIVED_AT, LAST_UPDATED) 
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (REQUEST_ID, REFERENCE, VENDOR_ID, AMOUNT, CURRENCY, STATUS, RECEIVED_AT, LAST_UPDATED, CPI_RESPONSE) 
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         
-        # Prepare the data tuple
         current_time = datetime.datetime.utcnow()
+        
+        # Store the entire received payload in CPI_RESPONSE for debugging/completeness
+        full_payload_json = json.dumps(data) 
+        
+        # *** FIX: Prepare the data tuple with correct values in the correct order ***
         values = (
-            request_uuid,
-            data["vendorld"],
-            data["invoice"],
-            data["amount"],
-            data["currency"],
-            data["companyCode"],
-            data["reference"],
-            "INITIATED", # Initial status before calling CPI
-            current_time,
-            current_time
+            request_uuid,              # 1. REQUEST_ID
+            data["reference"],         # 2. REFERENCE
+            data["vendorld"],          # 3. VENDOR_ID
+            str(data["amount"]),       # 4. AMOUNT (Convert float back to string for parameter binding)
+            data["currency"],          # 5. CURRENCY
+            "INITIATED",               # 6. STATUS
+            current_time,              # 7. RECEIVED_AT
+            current_time,              # 8. LAST_UPDATED (Note: Swapped CPI_RESPONSE and LAST_UPDATED position for better logical flow, but matching the SQL above)
+            full_payload_json          # 9. CPI_RESPONSE (Logging full payload here)
         )
         
         cursor.execute(sql, values)
@@ -107,7 +110,9 @@ def log_payment_request(data):
         return True, request_uuid
         
     except Error as e:
-        print(f"Database insertion failed: {e}")
+        # This block will now catch the error if the table still has a schema mismatch 
+        # (e.g., if INVOICE or COMPANY_CODE are mandatory and missing).
+        print(f"Database insertion failed (Check your table schema!): {e}")
         conn.rollback()
         return False, request_uuid
         
@@ -148,7 +153,7 @@ def submit_payment_request():
         return jsonify({"status": "FAILED", "message": "Validation Error: Amount field is invalid or missing."}), 400
 
     # ----------------------------------------------------------------------
-    # *** INSERTED: NEW STEP - Log the request to Aiven MySQL ***
+    # *** Log the request to Aiven MySQL ***
     # ----------------------------------------------------------------------
     log_success, request_uuid = log_payment_request(data)
 
@@ -282,7 +287,7 @@ def get_transaction_details(request_id):
     try:
         cur = conn.cursor(dictionary=True)
         # Select fields that align with the new schema logic
-        cur.execute("SELECT REQUEST_ID, REFERENCE, VENDOR_ID, AMOUNT, CURRENCY, STATUS, RECEIVED_AT, LAST_UPDATED FROM PAYMENT_REQUEST WHERE REQUEST_ID = %s", (request_id,))
+        cur.execute("SELECT REQUEST_ID, REFERENCE, VENDOR_ID, AMOUNT, CURRENCY, STATUS, RECEIVED_AT, LAST_UPDATED, CPI_RESPONSE FROM PAYMENT_REQUEST WHERE REQUEST_ID = %s", (request_id,))
         transaction = cur.fetchone()
         
         if transaction:
