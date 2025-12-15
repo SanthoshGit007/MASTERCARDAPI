@@ -19,11 +19,17 @@ DB_PORT = os.getenv('MYSQL_PORT', '10438')
 DB_NAME = os.getenv('MYSQL_DATABASE', 'mastercard_db')
 
 # Aiven SSL Certificate Authority file path (REQUIRED FOR CONNECTION)
-# You MUST download this from your Aiven Console and ensure the path is correct.
 SSL_CA_CERT_PATH = os.getenv('SSL_CA_CERT_PATH', 'ca.pem') 
 
 # SAP CPI Target URL (Endpoint for the MC_PAY_INIT iFlow - TSD Step 3)
 CPI_INITIATE_URL = os.getenv('CPI_INITIATE_URL', 'https://671a3e92trial.it-cpitrial03-rt.cfapps.ap21.hana.ondemand.com/http/vcc/payment/initiate')
+
+# --- CPI AUTHENTICATION FIX ---
+# BEST PRACTICE: Use environment variables (e.g., os.getenv('CPI_USER'))
+# We are hardcoding for immediate testing based on your input:
+CPI_USER = 'santhoshkumarbsk1998@gmail.com'
+CPI_PASSWORD = '$@NtroSAP'
+# ------------------------------
 
 
 # --- Database Connection Utilities ---
@@ -39,13 +45,10 @@ def get_db_connection():
             port=DB_PORT,
             # --- CONNECTION FIX: Aiven requires SSL CA file ---
             ssl_ca=SSL_CA_CERT_PATH, 
-            # Temporary workaround for the authentication plugin issue if SSL alone fails:
-            # auth_plugin='mysql_native_password' 
         )
         return conn
     except Error as e:
         print(f"MySQL Database connection failed: {e}")
-        # Note: If this still fails, double-check your CA file path and firewall rules.
         return None
 
 def init_db():
@@ -94,7 +97,7 @@ def submit_payment_request():
     
     cpi_headers = {
         'Content-Type': 'application/json',
-        # ADD SECURITY HEADERS HERE (e.g., Basic Auth or Bearer Token for CPI)
+        # Authentication will now be handled by the 'auth' parameter
     }
     
     try:
@@ -102,6 +105,8 @@ def submit_payment_request():
             CPI_INITIATE_URL, 
             json=data, 
             headers=cpi_headers, 
+            # --- FIX APPLIED: ADD BASIC AUTHENTICATION ---
+            auth=(CPI_USER, CPI_PASSWORD),
             verify=False # Set to True in production
         )
         cpi_response.raise_for_status() # Raise exception for 4xx or 5xx status codes
@@ -129,7 +134,7 @@ def submit_payment_request():
 
 
 # --- INBOUND ENDPOINT: Settlement Confirmation (Reconciliation Support) ---
-
+# ... (rest of the code remains the same)
 @app.post("/mastercard/receive_settlement_confirmation")
 def receive_settlement_confirmation():
     """
