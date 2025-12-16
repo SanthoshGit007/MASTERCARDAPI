@@ -21,16 +21,6 @@ DB_NAME = os.getenv('MYSQL_DATABASE', 'mastercard_db')
 # Aiven SSL Certificate Authority file path (REQUIRED FOR CONNECTION)
 SSL_CA_CERT_PATH = os.getenv('SSL_CA_CERT_PATH', 'ca.pem') 
 
-# --- FIX APPLIED: Ensure correct CPI URL is the default ---
-# SAP CPI Target URL (Endpoint for the MC_PAY_INIT iFlow - TSD Step 3)
-CPI_INITIATE_URL = os.getenv('CPI_INITIATE_URL', 'https://671a3e92trial.it-cpitrial03-rt.cfapps.ap21.hana.ondemand.com/http/vcc/payment/initiate')
-
-# --- CPI AUTHENTICATION (From previous step) ---
-CPI_USER = 'santhoshkumarbsk1998@gmail.com'
-CPI_PASSWORD = '$@NtroSAP'
-# ------------------------------------------------
-
-
 # --- Database Connection Utilities ---
 
 def get_db_connection():
@@ -62,12 +52,10 @@ def init_db():
 init_db()
 
 
-# --- CORRECTED DATABASE LOGGING FUNCTION ---
+# --- DATABASE LOGGING FUNCTION ---
 
 def log_payment_request(data):
-    """Logs the incoming payment request data to the PAYMENT_REQUEST table,
-    aligning with the user's provided schema (9 columns).
-    """
+    """Logs the incoming payment request data to the PAYMENT_REQUEST table."""
     request_uuid = str(uuid.uuid4())
     
     conn = get_db_connection()
@@ -78,8 +66,7 @@ def log_payment_request(data):
     try:
         cursor = conn.cursor()
         
-        # *** FIX: Aligned SQL statement to user's 9-column schema ***
-        # The column order must match the values tuple below.
+        # SQL matches your Schema
         sql = """
         INSERT INTO PAYMENT_REQUEST 
         (REQUEST_ID, REFERENCE, VENDOR_ID, AMOUNT, CURRENCY, STATUS, RECEIVED_AT, LAST_UPDATED, CPI_RESPONSE) 
@@ -88,20 +75,19 @@ def log_payment_request(data):
         
         current_time = datetime.datetime.utcnow()
         
-        # Store the entire received payload in CPI_RESPONSE for debugging/completeness
+        # Store the entire received payload in CPI_RESPONSE column for trace
         full_payload_json = json.dumps(data) 
         
-        # *** FIX: Prepare the data tuple with correct values in the correct order ***
         values = (
             request_uuid,              # 1. REQUEST_ID
             data["reference"],         # 2. REFERENCE
             data["vendorld"],          # 3. VENDOR_ID
-            str(data["amount"]),       # 4. AMOUNT (Convert float back to string for parameter binding)
+            str(data["amount"]),       # 4. AMOUNT
             data["currency"],          # 5. CURRENCY
             "INITIATED",               # 6. STATUS
             current_time,              # 7. RECEIVED_AT
-            current_time,              # 8. LAST_UPDATED (Note: Swapped CPI_RESPONSE and LAST_UPDATED position for better logical flow, but matching the SQL above)
-            full_payload_json          # 9. CPI_RESPONSE (Logging full payload here)
+            current_time,              # 8. LAST_UPDATED 
+            full_payload_json          # 9. CPI_RESPONSE (Storing payload here)
         )
         
         cursor.execute(sql, values)
@@ -110,9 +96,7 @@ def log_payment_request(data):
         return True, request_uuid
         
     except Error as e:
-        # This block will now catch the error if the table still has a schema mismatch 
-        # (e.g., if INVOICE or COMPANY_CODE are mandatory and missing).
-        print(f"Database insertion failed (Check your table schema!): {e}")
+        print(f"Database insertion failed: {e}")
         conn.rollback()
         return False, request_uuid
         
@@ -122,110 +106,76 @@ def log_payment_request(data):
 # ----------------------------------------
 
 
-# --- CORE ENDPOINT: Payment Submission and CPI Trigger (Outbound Flow) ---
+# --- CORE ENDPOINT: Payment Submission (FIXED) ---
 
 @app.post("/mastercard/submit_payment")
 def submit_payment_request():
     """
-    1. Receives payment request from the client/SAP.
-    2. Validates essential data (TSD Step 2).
-    3. Logs request to Aiven DB (NEW STEP).
-    4. Triggers the SAP CPI iFlow (TSD Step 3).
+    1. Receives payment request from CPI.
+    2. Validates essential data.
+    3. Logs request to Aiven DB.
+    4. Returns Success to CPI (Ends the process).
     """
     data = request.json
     
     # Define required fields based on the payment file payload from SAP F110
     required_fields = ["vendorld", "invoice", "amount", "currency", "companyCode", "reference"] 
     
+    # 1. Check Required Fields
     if not all(field in data for field in required_fields):
         return jsonify({
             "status": "ERROR", 
             "message": "Missing one or more required payment fields."
         }), 400
 
-    # --- Validation Logic (TSD Step 2) ---
+    # 2. Validation Logic
     try:
         amount = float(data["amount"])
         if amount <= 0:
             return jsonify({"status": "FAILED", "message": "Validation Error: Amount must be positive."}), 400
-        # Add more complex validation here (e.g., format checks)
     except (TypeError, ValueError):
         return jsonify({"status": "FAILED", "message": "Validation Error: Amount field is invalid or missing."}), 400
 
-    # ----------------------------------------------------------------------
-    # *** Log the request to Aiven MySQL ***
-    # ----------------------------------------------------------------------
+    # 3. Log the request to Aiven MySQL
     log_success, request_uuid = log_payment_request(data)
 
-    # Add the generated ID to the data to pass to CPI and include in the response
-    data['request_id'] = request_uuid
+    # 4. Return Success Response to CPI
+    # --- CRITICAL FIX: Loop Removed. We do NOT call CPI back here. ---
+    
+    if log_success:
+        print(f"Validation successful for ref: {data.get('reference')}. Payment Stored.")
+        
+        # Simulate a Mastercard VCC Number generation
+        mock_vcc_number = "5500" + str(uuid.uuid4().int)[:12] 
 
-    print(f"Validation successful for ref: {data.get('reference')}. Forwarding to CPI.")
-    # ----------------------------------------------------------------------
-    
-    # --- TSD Step 3: Trigger CPI iFlow (HTTP Call) ---
-    
-    cpi_headers = {
-        'Content-Type': 'application/json',
-        # Pass the Request ID to CPI for end-to-end tracing
-        'X-Request-ID': request_uuid 
-    }
-    
-    try:
-        cpi_response = requests.post(
-            CPI_INITIATE_URL, 
-            json=data, 
-            headers=cpi_headers, 
-            # Basic Auth applied using the user/pass defined above
-            auth=(CPI_USER, CPI_PASSWORD),
-            verify=False # Set to True in production
-        )
-        cpi_response.raise_for_status() # Raise exception for 4xx or 5xx status codes
-
-        # TSD Step 6: Return Response
         return jsonify({
             "status": "ACCEPTED",
             "reference": data["reference"],
-            "request_id": request_uuid, # Include the new ID in the response
-            "message": "Payment request validated and successfully forwarded to SAP CPI.",
-            "cpi_status_code": cpi_response.status_code,
-            "cpi_response": cpi_response.json() if cpi_response.content else {"note": "No JSON body returned from CPI"}
+            "request_id": request_uuid,
+            "message": "Payment request received and stored successfully.",
+            "mastercard_vcc_number": mock_vcc_number,
+            "mastercard_status": "PROCESSING"
         }), 202 # Accepted status
 
-    except requests.exceptions.RequestException as e:
-        print(f"CPI Trigger FAILED for ref: {data.get('reference')}. Error: {e}")
-        # When an error occurs, the Python app returns a JSON object containing the error details.
-        http_code = getattr(e.response, 'status_code', 500) if e.response else 500
-        # TSD Step 6: Return Error
+    else:
         return jsonify({
-            "status": "FAILED", 
-            "reference": data["reference"],
-            "request_id": request_uuid, # Include the new ID in the response
-            "message": "Failed to trigger SAP CPI iFlow. Check CPI configuration.",
-            "error_detail": str(e),
-            "cpi_http_code": http_code
-        }), 502 # Bad Gateway
+            "status": "FAILED",
+            "message": "Database Error: Could not store payment request."
+        }), 500
 
 
-# --- INBOUND ENDPOINT: Settlement Confirmation (Reconciliation Support) ---
+# --- INBOUND ENDPOINT: Settlement Confirmation ---
 
 @app.post("/mastercard/receive_settlement_confirmation")
 def receive_settlement_confirmation():
     """
-    Placeholder for the Inbound flow (Automated Reconciliation / EBRS).
-    Receives settlement status/UTR confirmation from Mastercard (via CPI).
+    Placeholder for the Inbound flow (Automated Reconciliation).
     """
     data = request.json
-    
-    # In a real scenario, you would log this to a custom table
     print(f"Received settlement confirmation for Ref: {data.get('reference')}. Status: {data.get('status')}")
-    
-    # After logging, this data would typically be pushed to the SAP OData 
-    # service dedicated to bank statement processing for EBRS.
-    
     return jsonify({
         "status": "ACKNOWLEDGED", 
-        "message": "Settlement confirmation received and successfully queued for SAP reconciliation."
+        "message": "Settlement confirmation received and successfully queued."
     }), 200
 
 
@@ -250,43 +200,14 @@ def health_check():
         "db_code": db_code
     }), 200
 
-@app.get("/accounts/<string:acc_type>/<string:acc_no>")
-def get_account_details(acc_type, acc_no):
-    """Retrieves account details for CUSTOMER or VENDOR accounts (MOCK)."""
-    if acc_type not in ['customer', 'vendor']:
-        return jsonify({"message": "Invalid account type"}), 400
-    
-    table_name = "CUSTOMER_ACCOUNT" if acc_type == 'customer' else "VENDOR_ACCOUNT"
-    conn = get_db_connection()
-    if not conn: return jsonify({"message": "DB connection failed"}), 503
-    
-    try:
-        cur = conn.cursor(dictionary=True)
-        cur.execute(f"SELECT * FROM {table_name} WHERE ACC_NO = %s", (acc_no,))
-        account = cur.fetchone()
-        
-        if account:
-            return jsonify(account), 200
-        else:
-            return jsonify({"message": f"{acc_type.capitalize()} account not found"}), 404
-    except Error as e:
-        return jsonify({"message": str(e)}), 500
-    finally:
-        if cur: cur.close()
-        if conn: conn.close()
-
 @app.get("/transactions/<string:request_id>")
 def get_transaction_details(request_id):
-    """
-    Retrieves a single transaction log from PAYMENT_REQUEST (MOCK log table).
-    NOTE: Using new fields REFERENCE and VENDOR_ID.
-    """
+    """Retrieves a single transaction log from PAYMENT_REQUEST."""
     conn = get_db_connection()
     if not conn: return jsonify({"message": "DB connection failed"}), 503
     
     try:
         cur = conn.cursor(dictionary=True)
-        # Select fields that align with the new schema logic
         cur.execute("SELECT REQUEST_ID, REFERENCE, VENDOR_ID, AMOUNT, CURRENCY, STATUS, RECEIVED_AT, LAST_UPDATED, CPI_RESPONSE FROM PAYMENT_REQUEST WHERE REQUEST_ID = %s", (request_id,))
         transaction = cur.fetchone()
         
