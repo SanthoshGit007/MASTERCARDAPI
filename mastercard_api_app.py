@@ -207,7 +207,7 @@ def health_check():
 
     return jsonify({
         "status": "OK",
-        "service": "Mastercard API Wrapper (Britannia)",
+        "service": "Mastercard API Wrapper",
         "db_status": db_status,
         "db_code": db_code
     }), 200
