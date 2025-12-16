@@ -52,19 +52,37 @@ def init_db():
 init_db()
 
 
-# --- DATABASE LOGGING FUNCTION ---
+# --- DATABASE LOGGING FUNCTION (WITH DUPLICATE CHECK) ---
 
 def log_payment_request(data):
-    """Logs the incoming payment request data to the PAYMENT_REQUEST table."""
-    request_uuid = str(uuid.uuid4())
-    
+    """
+    Logs the payment request. 
+    Implements IDEMPOTENCY: Checks if 'reference' already exists to prevent duplicates.
+    """
     conn = get_db_connection()
     if not conn:
         print("CRITICAL: Failed to get DB connection for logging.")
-        return False, request_uuid 
+        return False, None
         
     try:
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
+        
+        # --- LOGIC 1: IDEMPOTENCY CHECK ---
+        # Check if this specific Reference (Invoice/Doc Num) already exists.
+        check_sql = "SELECT REQUEST_ID FROM PAYMENT_REQUEST WHERE REFERENCE = %s"
+        cursor.execute(check_sql, (data["reference"],))
+        existing_record = cursor.fetchone()
+
+        if existing_record:
+            print(f"Duplicate detected: Payment for Ref {data['reference']} already processed.")
+            # Return the EXISTING ID so SAP gets a success response, but we don't duplicate the charge.
+            return True, existing_record['REQUEST_ID']
+
+        # --- LOGIC 2: NEW PAYMENT INSERTION ---
+        # If it doesn't exist, generate new ID and Insert
+        request_uuid = str(uuid.uuid4())
+        current_time = datetime.datetime.utcnow()
+        full_payload_json = json.dumps(data) 
         
         # SQL matches your Schema
         sql = """
@@ -72,11 +90,6 @@ def log_payment_request(data):
         (REQUEST_ID, REFERENCE, VENDOR_ID, AMOUNT, CURRENCY, STATUS, RECEIVED_AT, LAST_UPDATED, CPI_RESPONSE) 
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        
-        current_time = datetime.datetime.utcnow()
-        
-        # Store the entire received payload in CPI_RESPONSE column for trace
-        full_payload_json = json.dumps(data) 
         
         values = (
             request_uuid,              # 1. REQUEST_ID
@@ -92,13 +105,13 @@ def log_payment_request(data):
         
         cursor.execute(sql, values)
         conn.commit()
-        print(f"Logged payment request {request_uuid} to database.")
+        print(f"Logged NEW payment request {request_uuid} to database.")
         return True, request_uuid
         
     except Error as e:
         print(f"Database insertion failed: {e}")
         conn.rollback()
-        return False, request_uuid
+        return False, None
         
     finally:
         if cursor: cursor.close()
@@ -106,14 +119,14 @@ def log_payment_request(data):
 # ----------------------------------------
 
 
-# --- CORE ENDPOINT: Payment Submission (FIXED) ---
+# --- CORE ENDPOINT: Payment Submission ---
 
 @app.post("/mastercard/submit_payment")
 def submit_payment_request():
     """
     1. Receives payment request from CPI.
     2. Validates essential data.
-    3. Logs request to Aiven DB.
+    3. Logs request to Aiven DB (Handling Duplicates).
     4. Returns Success to CPI (Ends the process).
     """
     data = request.json
@@ -136,11 +149,10 @@ def submit_payment_request():
     except (TypeError, ValueError):
         return jsonify({"status": "FAILED", "message": "Validation Error: Amount field is invalid or missing."}), 400
 
-    # 3. Log the request to Aiven MySQL
+    # 3. Log the request to Aiven MySQL (With Idempotency Check)
     log_success, request_uuid = log_payment_request(data)
 
     # 4. Return Success Response to CPI
-    # --- CRITICAL FIX: Loop Removed. We do NOT call CPI back here. ---
     
     if log_success:
         print(f"Validation successful for ref: {data.get('reference')}. Payment Stored.")
