@@ -52,12 +52,12 @@ def init_db():
 init_db()
 
 
-# --- DATABASE LOGGING FUNCTION (WITH DUPLICATE CHECK) ---
+# --- DATABASE LOGGING FUNCTION (UPDATED FOR FULL BANKING DETAILS) ---
 
 def log_payment_request(data):
     """
-    Logs the payment request. 
-    Implements IDEMPOTENCY: Checks if 'reference' already exists to prevent duplicates.
+    Logs the payment request with ALL banking details.
+    Implements IDEMPOTENCY: Checks if 'invoice' (reference) already exists.
     """
     conn = get_db_connection()
     if not conn:
@@ -68,39 +68,54 @@ def log_payment_request(data):
         cursor = conn.cursor(dictionary=True)
         
         # --- LOGIC 1: IDEMPOTENCY CHECK ---
-        # Check if this specific Reference (Invoice/Doc Num) already exists.
+        # Using 'invoice' as the unique reference key
         check_sql = "SELECT REQUEST_ID FROM PAYMENT_REQUEST WHERE REFERENCE = %s"
-        cursor.execute(check_sql, (data["reference"],))
+        cursor.execute(check_sql, (data.get("invoice"),))
         existing_record = cursor.fetchone()
 
         if existing_record:
-            print(f"Duplicate detected: Payment for Ref {data['reference']} already processed.")
-            # Return the EXISTING ID so SAP gets a success response, but we don't duplicate the charge.
+            print(f"Duplicate detected: Payment for Invoice {data.get('invoice')} already processed.")
+            # Return the EXISTING ID so SAP gets a success response, but we don't duplicate.
             return True, existing_record['REQUEST_ID']
 
         # --- LOGIC 2: NEW PAYMENT INSERTION ---
-        # If it doesn't exist, generate new ID and Insert
         request_uuid = str(uuid.uuid4())
         current_time = datetime.datetime.utcnow()
         full_payload_json = json.dumps(data) 
         
-        # SQL matches your Schema
+        # SQL with NEW EXTENDED COLUMNS
         sql = """
         INSERT INTO PAYMENT_REQUEST 
-        (REQUEST_ID, REFERENCE, VENDOR_ID, AMOUNT, CURRENCY, STATUS, RECEIVED_AT, LAST_UPDATED, CPI_RESPONSE) 
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (
+            REQUEST_ID, REFERENCE, VENDOR_ID, AMOUNT, CURRENCY, STATUS, 
+            RECEIVED_AT, LAST_UPDATED, CPI_RESPONSE,
+            PAYER_ACC_NO, PAYER_IFSC, VENDOR_IFSC, VENDOR_BANK_NAME, 
+            VENDOR_BRANCH, VENDOR_ACC_TYPE, VCC_CARD_NO, VCC_STATUS, PAYMENT_DUE_DATE
+        ) 
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         
+        # Mapping JSON keys (from CPI) to DB Columns
         values = (
-            request_uuid,              # 1. REQUEST_ID
-            data["reference"],         # 2. REFERENCE
-            data["vendorld"],          # 3. VENDOR_ID
-            str(data["amount"]),       # 4. AMOUNT
-            data["currency"],          # 5. CURRENCY
-            "INITIATED",               # 6. STATUS
-            current_time,              # 7. RECEIVED_AT
-            current_time,              # 8. LAST_UPDATED 
-            full_payload_json          # 9. CPI_RESPONSE (Storing payload here)
+            request_uuid,                       # 1. REQUEST_ID
+            data.get("invoice"),                # 2. REFERENCE (Mapped from InvoiceID)
+            data.get("vendorId"),               # 3. VENDOR_ID
+            str(data.get("amount")),            # 4. AMOUNT
+            data.get("currency"),               # 5. CURRENCY
+            "INITIATED",                        # 6. STATUS
+            current_time,                       # 7. RECEIVED_AT
+            current_time,                       # 8. LAST_UPDATED 
+            full_payload_json,                  # 9. CPI_RESPONSE (Full JSON dump)
+            # --- NEW FIELDS ---
+            data.get("payerAcctNum"),           # 10. PAYER_ACC_NO
+            data.get("payerIFSC"),              # 11. PAYER_IFSC
+            data.get("vendorIFSC"),             # 12. VENDOR_IFSC
+            data.get("vendorBankName"),         # 13. VENDOR_BANK_NAME
+            data.get("vendorBranch"),           # 14. VENDOR_BRANCH
+            data.get("vendorBankAccountType"),  # 15. VENDOR_ACC_TYPE
+            data.get("vccCardNum"),             # 16. VCC_CARD_NO
+            data.get("vccStatus"),              # 17. VCC_STATUS
+            data.get("paymentDueDate")          # 18. PAYMENT_DUE_DATE
         )
         
         cursor.execute(sql, values)
@@ -127,18 +142,21 @@ def submit_payment_request():
     1. Receives payment request from CPI.
     2. Validates essential data.
     3. Logs request to Aiven DB (Handling Duplicates).
-    4. Returns Success to CPI (Ends the process).
+    4. Returns Success to CPI.
     """
     data = request.json
     
-    # Define required fields based on the payment file payload from SAP F110
-    required_fields = ["vendorld", "invoice", "amount", "currency", "companyCode", "reference"] 
+    # Define required fields (Updated to match new CPI Mapping)
+    # We now check 'vendorId' instead of the old 'vendorld'
+    required_fields = ["vendorId", "invoice", "amount", "currency"] 
     
     # 1. Check Required Fields
-    if not all(field in data for field in required_fields):
+    # Only strictly failing if critical keys are missing.
+    missing_fields = [field for field in required_fields if field not in data]
+    if missing_fields:
         return jsonify({
             "status": "ERROR", 
-            "message": "Missing one or more required payment fields."
+            "message": f"Missing required payment fields: {', '.join(missing_fields)}"
         }), 400
 
     # 2. Validation Logic
@@ -155,14 +173,14 @@ def submit_payment_request():
     # 4. Return Success Response to CPI
     
     if log_success:
-        print(f"Validation successful for ref: {data.get('reference')}. Payment Stored.")
+        print(f"Validation successful for invoice: {data.get('invoice')}. Payment Stored.")
         
         # Simulate a Mastercard VCC Number generation
         mock_vcc_number = "5500" + str(uuid.uuid4().int)[:12] 
 
         return jsonify({
             "status": "ACCEPTED",
-            "reference": data["reference"],
+            "reference": data.get("invoice"),
             "request_id": request_uuid,
             "message": "Payment request received and stored successfully.",
             "mastercard_vcc_number": mock_vcc_number,
@@ -220,7 +238,8 @@ def get_transaction_details(request_id):
     
     try:
         cur = conn.cursor(dictionary=True)
-        cur.execute("SELECT REQUEST_ID, REFERENCE, VENDOR_ID, AMOUNT, CURRENCY, STATUS, RECEIVED_AT, LAST_UPDATED, CPI_RESPONSE FROM PAYMENT_REQUEST WHERE REQUEST_ID = %s", (request_id,))
+        # Select ALL columns to verify full data insertion
+        cur.execute("SELECT * FROM PAYMENT_REQUEST WHERE REQUEST_ID = %s", (request_id,))
         transaction = cur.fetchone()
         
         if transaction:
